@@ -3,6 +3,7 @@ var graph,
     allCells,
     MAP_CELLS = {},
     MAP_LEDS = {},
+    MAP_VISIBILITY = {},
     MAP_PROGRESS_BAR = {},
     MAP_SPEEDOMETER = {},
     MAP_CALLBACKS = {},
@@ -17,7 +18,9 @@ var graph,
     pitchInterval,
     asyncData = {},
     asyncStatus = false,
-    numbersRoundPrecision;
+    numbersRoundPrecision,
+    httpAjaxRequestInterval,
+    protocolType;
 
 var cw, ch,
     margin = 50,
@@ -25,28 +28,11 @@ var cw, ch,
 
 var containerDOM, outlineDOM, statusDOM;
 
-var params = {
-    socketAddress: 'ws://172.16.110.20:8003/ws',
-    // deviceId: 'hmi-server',
-    serverName: 'fanitoring-process',
-    // serverName: 'fanitoring-service',
-    // appId: 'hmi-app',
-    // peerId: 2,
-    reconnectOnClose: true,
-    connectionCheckTimeout: 10000,
-    serverRegisteration: true,
-    asyncLogging: {
-        onFunction: true,
-        // onMessageReceive: true,
-        // onMessageSend: true
-    }
-};
-
 /**
  * Async Functions
  */
 
-function initAsync() {
+function initAsync(params) {
 
     /**
      * Create a new Async Instance with given parameters
@@ -128,6 +114,43 @@ function initAsync() {
     });
 }
 
+function initHttp(params) {
+    updateMap();
+
+    httpAjaxRequestInterval = setInterval(function() {
+        let xhr = new XMLHttpRequest();
+        xhr.open(params.method, params.url + '&rand=' + Math.random());
+        xhr.send();
+        xhr.onerror = function () {
+            document.getElementById('toolbar-lastUpdate').innerText = 'Error at ' + new Date().toLocaleTimeString();
+            document.getElementById('toolbar-lastUpdate').style.background = 'red';
+            document.getElementById('toolbar-lastUpdate').style.color = 'white';
+        }
+        xhr.onload = function() {
+            if (xhr.status != 200) {
+                console.error(`Error ${xhr.status}: ${xhr.statusText}`);
+
+                document.getElementById('toolbar-lastUpdate').innerText = 'Error at ' + new Date().toLocaleTimeString();
+                document.getElementById('toolbar-lastUpdate').style.background = 'red';
+                document.getElementById('toolbar-lastUpdate').style.color = 'white';
+            }
+            else {
+                try {
+                    var result = JSON.parse(xhr.responseText);
+                    renderLiveDataOnMapWithPitch(result);
+
+                    document.getElementById('toolbar-lastUpdate').innerText = 'Last updated at ' + new Date().toLocaleTimeString();
+                    document.getElementById('toolbar-lastUpdate').style.background = 'green';
+                    document.getElementById('toolbar-lastUpdate').style.color = 'white';
+                }
+                catch (e) {
+                    console.log(e);
+                }
+            }
+        };
+    }, renderingPitch * 1000);
+}
+
 function primaryHandshake() {
     var data = {
         type: 7,
@@ -192,6 +215,21 @@ function main(params) {
 
     else {
         if (params) {
+            if(typeof params.protocol == 'string') {
+                protocolType = params.protocol;
+            }
+
+            if (typeof params.map == 'object') {
+                mapData = params.map;
+
+                if (typeof params.map.theme == 'string') {
+                    mapTheme = params.map.theme;
+                }
+                else {
+                    mapTheme = undefined;
+                }
+            }
+
             if (typeof params.map == 'object') {
                 mapData = params.map;
 
@@ -325,7 +363,15 @@ function main(params) {
             }
         }
 
-        initAsync();
+        switch (protocolType) {
+            case 'websockets':
+                initAsync(params.protocolParamsl);
+                break;
+
+            case 'http':
+                initHttp(params.protocolParams);
+                break;
+        }
         // fakeDataGenerator();
     }
 }
@@ -402,8 +448,12 @@ function createGraph(graphContainer, toolbarContainer, outlineContainer) {
     mxOutline.prototype.border = 0;
 
     if (toolbarContainer != null) {
-        addToolbarButton(graph, toolbarContainer, 'async', 'Async: Connecting', '', false);
-        // addToolbarButton(graph, toolbarContainer, 'getMaps', 'Get Maps List', '', false);
+        if(protocolType == 'websockets') {
+            addToolbarButton(graph, toolbarContainer, 'async', 'Async: Connecting', '', false);
+        }
+        if(protocolType == 'http') {
+            addToolbarButton(graph, toolbarContainer, 'lastUpdate', 'Initializing ...', '', false);
+        }
         addToolbarButton(graph, toolbarContainer, 'zoomIn', '', 'style/img/zoom-in.svg', false);
         addToolbarButton(graph, toolbarContainer, 'zoomOut', '', 'style/img/zoom-out.svg', false);
         addToolbarButton(graph, toolbarContainer, 'actualSize', '', 'style/img/full-size.svg', false);
@@ -411,6 +461,7 @@ function createGraph(graphContainer, toolbarContainer, outlineContainer) {
         if (typeof mapData.data == 'object') {
             addToolbarButton(graph, toolbarContainer, 'theme', '', 'style/img/theme.svg', false);
         }
+        // addToolbarButton(graph, toolbarContainer, 'getMaps', 'Get Maps List', '', false);
     }
     graph.dblClick = function(evt, cell) {
         graph.zoomIn();
@@ -431,6 +482,25 @@ function renderLiveDataOnMapWithPitch(content) {
         if (DYNAMIC_CELLS[entityId]) {
             for (var i = 0; i < DYNAMIC_CELLS[entityId].length; i++) {
                 switch (DYNAMIC_CELLS[entityId][i].type) {
+                    case 'visibility':
+                        try {
+                            var vis = DYNAMIC_CELLS[entityId][i],
+                                cell = vis.cell,
+                                visOpacities = vis.opacities,
+                                visValues = vis.values;
+
+                            visValueIndex = visValues.indexOf(parseInt(value));
+                            var opacity = visOpacities[visValueIndex];
+                        }
+                        catch (e) {
+                            console.error(e);
+                        }
+                        finally {
+                            // graph.getModel().setVisible(cell, value);
+                            graph.setCellStyles(mxConstants.STYLE_OPACITY, opacity, [cell]);
+                        }
+                        break;
+
                     case 'led':
                         try {
                             var led = DYNAMIC_CELLS[entityId][i],
@@ -438,7 +508,7 @@ function renderLiveDataOnMapWithPitch(content) {
                                 ledColors = led.colors,
                                 ledValues = led.values;
 
-                            ledValueIndex = ledValues.indexOf(value);
+                            ledValueIndex = ledValues.indexOf(parseInt(value));
                             var color = ledColors[ledValueIndex];
                         }
                         catch (e) {
@@ -516,20 +586,23 @@ function renderLiveDataOnMapWithPitch(content) {
                             var label = cell.getAttribute('label');
                             var newValue = Math.round(value * Math.pow(10, numbersRoundPrecision)) / Math.pow(10, numbersRoundPrecision) + ' ' + unit;
 
-                            if(label.indexOf("<") != -1) {
+                            if (label.indexOf('<') != -1) {
                                 var regex = /[>]([^<\n]+?)[<]/gm;
                                 var result = label.match(regex);
 
-                                if(result.length == 1) {
-                                    var mim = label.replace(new RegExp(regex), ">" + newValue.toString() + "<");
+                                if (result.length == 1) {
+                                    var mim = label.replace(new RegExp(regex), '>' + newValue.toString() + '<');
                                     cell.value.setAttribute('label', mim);
-                                } else {
+                                }
+                                else {
                                     var start = label.indexOf(result[0]);
-                                    var end = label.indexOf(result[result.length-1]);
-                                    var newLabel = label.substr(0, start + 1) + newValue.toString() + label.substring(end + result[result.length-1].length - 1, label.length);
+                                    var end = label.indexOf(result[result.length - 1]);
+                                    var newLabel = label.substr(0, start + 1) + newValue.toString() +
+                                        label.substring(end + result[result.length - 1].length - 1, label.length);
                                     cell.value.setAttribute('label', newLabel);
                                 }
-                            } else {
+                            }
+                            else {
                                 cell.value.setAttribute('label', newValue);
                             }
                         }
@@ -714,11 +787,6 @@ function addToolbarButton(graphObj, toolbar, action, label, image, isTransparent
 
 function updateMap() {
     DYNAMIC_CELLS = {};
-    // MAP_CELLS = {},
-    // MAP_LEDS = {},
-    // MAP_PROGRESS_BAR = {},
-    // MAP_SPEEDOMETER = {};
-    // MAP_ANIMATIONS = {};
     allCells = Object.values(graph.getModel().cells);
 
     try {
@@ -744,6 +812,38 @@ function updateMap() {
                     }
 
                     switch (allCells[i].getAttribute('type')) {
+                        case 'visibility':
+                            var visValues = [],
+                                visOpacities = [];
+
+                            allCells[i].getAttribute('breakPoints')
+                                .split(',')
+                                .map(function(str) {
+                                    visValues.push(parseInt(str.split(':')[0].trim()));
+                                    visOpacities.push(str.split(':')[1].trim());
+                                });
+
+                            if (!Array.isArray(MAP_VISIBILITY[cellEntityId])) {
+                                MAP_VISIBILITY[cellEntityId] = [];
+                            }
+
+                            MAP_VISIBILITY[cellEntityId].push({
+                                cell: allCells[i],
+                                id: allCells[i].id,
+                                values: visValues,
+                                opacities: visOpacities
+                            });
+
+                            DYNAMIC_CELLS[cellEntityId].push({
+                                type: 'visibility',
+                                cell: allCells[i],
+                                id: allCells[i].id,
+                                values: visValues,
+                                opacities: visOpacities
+                            });
+
+                            break;
+
                         case 'led':
                             var ledValues = [],
                                 ledColors = [],
@@ -758,59 +858,31 @@ function updateMap() {
                                 MAP_LEDS[cellEntityId] = [];
                             }
 
-                            if (allCells[i].children) {
-                                var children = allCells[i].children[0].children;
-                                if (children) {
-                                    for (var j = 0; j < children.length; j++) {
-                                        if (mxUtils.isNode(children[j].value)) {
-                                            if (children[j].getAttribute('active') == 'yes' ||
-                                                children[j].getAttribute('active')
-                                                    .toLowerCase() == 'true' || parseInt(children[j].getAttribute('active')) == 1) {
-                                                MAP_LEDS[cellEntityId].push({
-                                                    cell: children[j],
-                                                    id: children[j].id,
-                                                    label: children[j].getAttribute('label'),
-                                                    values: ledValues,
-                                                    colors: ledColors
-                                                });
+                            MAP_LEDS[cellEntityId].push({
+                                cell: allCells[i],
+                                id: allCells[i].id,
+                                label: allCells[i].getAttribute('label'),
+                                values: ledValues,
+                                colors: ledColors
+                            });
 
-                                                DYNAMIC_CELLS[cellEntityId].push({
-                                                    type: 'led',
-                                                    cell: children[j],
-                                                    id: children[j].id,
-                                                    label: children[j].getAttribute('label'),
-                                                    values: ledValues,
-                                                    colors: ledColors
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            else {
-                                MAP_LEDS[cellEntityId].push({
-                                    cell: allCells[i],
-                                    id: allCells[i].id,
-                                    label: allCells[i].getAttribute('label'),
-                                    values: ledValues,
-                                    colors: ledColors
-                                });
+                            DYNAMIC_CELLS[cellEntityId].push({
+                                type: 'led',
+                                cell: allCells[i],
+                                id: allCells[i].id,
+                                label: allCells[i].getAttribute('label'),
+                                values: ledValues,
+                                colors: ledColors
+                            });
 
-                                DYNAMIC_CELLS[cellEntityId].push({
-                                    type: 'led',
-                                    cell: allCells[i],
-                                    id: allCells[i].id,
-                                    label: allCells[i].getAttribute('label'),
-                                    values: ledValues,
-                                    colors: ledColors
-                                });
-                            }
                             break;
 
                         case 'progress_bar':
                             var cellGeometry = allCells[i].getGeometry(),
                                 cellLength = (cellGeometry.height > cellGeometry.width) ? cellGeometry.height : cellGeometry.width,
-                                initialLength = (MAP_PROGRESS_BAR[cellEntityId] && MAP_PROGRESS_BAR[cellEntityId][0].initialLength > 0) ? MAP_PROGRESS_BAR[cellEntityId][0].initialLength : cellLength,
+                                initialLength = (MAP_PROGRESS_BAR[cellEntityId] && MAP_PROGRESS_BAR[cellEntityId][0].initialLength > 0)
+                                    ? MAP_PROGRESS_BAR[cellEntityId][0].initialLength
+                                    : cellLength,
                                 valueRatio = (allCells[i].getAttribute('maxValue') > 0) ? allCells[i].getAttribute('maxValue') / initialLength : 1,
                                 progressBarStops = [],
                                 progressBarColors = [],
@@ -923,14 +995,15 @@ function updateMap() {
         console.error(e);
     }
 
-    // console.log({
-    //     DYNAMIC_CELLS,
-    //     // MAP_ANIMATIONS,
-    //     MAP_CELLS,
-    //     MAP_LEDS,
-    //     MAP_PROGRESS_BAR,
-    //     MAP_SPEEDOMETER
-    // });
+    console.log({
+        DYNAMIC_CELLS,
+        // MAP_ANIMATIONS,
+        MAP_CELLS,
+        MAP_LEDS,
+        MAP_PROGRESS_BAR,
+        MAP_SPEEDOMETER,
+        MAP_VISIBILITY
+    });
 }
 
 /**
